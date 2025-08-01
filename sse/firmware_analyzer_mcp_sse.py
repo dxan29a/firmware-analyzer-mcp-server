@@ -46,10 +46,10 @@ def resolve_file_path(file_id: str) -> str:
         # Extract filename from file ID
         filename = file_id.replace("download_", "")
         
-        # Search in uploads directory
-        upload_dir = Path("uploads")
-        if upload_dir.exists():
-            for file_path in upload_dir.glob("*"):
+        # Search in downloads directory
+        download_dir = Path("downloads")
+        if download_dir.exists():
+            for file_path in download_dir.glob("*"):
                 if file_path.is_file():
                     # Check if this file matches the filename
                     if file_path.name == filename:
@@ -111,8 +111,8 @@ def get_tools_definition():
                 "required": ["squashfs_path"]
             }
         },
-        "find_password_files": {
-            "description": "Find /etc/passwd and /etc/shadow files in extracted filesystem",
+        "find_hardcoded_password": {
+            "description": "Find hardcoded passwords in /etc/passwd and /etc/shadow files to identify security concerns",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -238,8 +238,15 @@ async def decompress_file(arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"File not found at {file_path}"}
     
     try:
-        # Create a temporary directory for extraction
-        temp_dir = tempfile.mkdtemp(prefix="decompress_")
+        # Create decompressed directory if it doesn't exist
+        decompressed_dir = Path("decompressed")
+        decompressed_dir.mkdir(exist_ok=True)
+        
+        # Create a unique subdirectory for this extraction
+        timestamp = int(time.time())
+        extract_dir = decompressed_dir / f"decompress_{os.path.basename(file_path)}_{timestamp}"
+        extract_dir.mkdir(exist_ok=True)
+        
         extracted_files_list = []
         decompression_log = []
         
@@ -393,11 +400,11 @@ async def decompress_file(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 decompression_log.append(f"  Error processing {current_file}: {str(e)}")
         
         # Start recursive decompression
-        decompress_recursive(file_path, temp_dir)
+        decompress_recursive(file_path, extract_dir)
         
         # Collect final results
         final_files = []
-        for root, dirs, files in os.walk(temp_dir):
+        for root, dirs, files in os.walk(extract_dir):
             for file in files:
                 file_path = os.path.join(root, file)
                 try:
@@ -419,7 +426,7 @@ async def decompress_file(arguments: Dict[str, Any]) -> Dict[str, Any]:
         
         result = {
             "original_file": file_path,
-            "extraction_directory": temp_dir,
+            "extraction_directory": str(extract_dir),
             "decompression_log": decompression_log,
             "final_files": final_files,
             "total_files": len(final_files),
@@ -485,7 +492,7 @@ async def extract_with_binwalk(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "extraction_directory": extract_dir,
                 "extracted_items": extracted_items[:20],  # Show first 20 items
                 "total_items": len(extracted_items),
-                "next_step": f"Use find_password_files tool with path: {extract_dir}"
+                "next_step": f"Use find_hardcoded_password tool with path: {extract_dir}"
             }
             
         else:
@@ -510,42 +517,30 @@ async def extract_squashfs(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "error": f"SquashFS file not found at {squashfs_path}"
         }
     
-    # Create extraction directory under current process directory
-    process_dir = Path("extractions")
-    process_dir.mkdir(exist_ok=True)
-    extract_dir = process_dir / f"squashfs_extract_{os.path.basename(squashfs_path)}_{int(time.time())}"
+    # Create extracted_squashfs directory if it doesn't exist
+    extracted_squashfs_dir = Path("extracted_squashfs")
+    extracted_squashfs_dir.mkdir(exist_ok=True)
+    
+    # Create a unique subdirectory for this extraction
+    timestamp = int(time.time())
+    extract_dir = extracted_squashfs_dir / f"squashfs_extract_{os.path.basename(squashfs_path)}_{timestamp}"
     extract_dir.mkdir(exist_ok=True)
     
     try:
         # Run unsquashfs extraction with sudo to handle device files
         result = subprocess.run(
-            ["sudo", "unsquashfs", "-d", str(extract_dir), "-no-progress", squashfs_path],
+            ["unsquashfs", "-d", str(extract_dir), "-no-progress", squashfs_path],
             capture_output=True,
             text=True
         )
-        
-        if result.returncode == 0:
-            extracted_files[squashfs_path] = str(extract_dir)
-            
-            return {
-                "success": True,
-                "message": "SquashFS extraction completed successfully!",
-                "extraction_directory": str(extract_dir),
-                "next_step": f"Use find_password_files tool with path: {extract_dir}"
-            }
-            
-        else:
-            return {
-                "error": f"SquashFS extraction failed:\n{result.stderr}"
-            }
-            
+         
     except Exception as e:
         return {
             "error": f"Error during SquashFS extraction: {str(e)}"
         }
 
-async def find_password_files(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Find /etc/passwd and /etc/shadow files in extracted filesystem."""
+async def find_hardcoded_password(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Find hardcoded passwords in /etc/passwd and /etc/shadow files to identify security concerns."""
     extracted_path = arguments.get("extracted_path")
     
     if not extracted_path or not os.path.exists(extracted_path):
@@ -555,6 +550,7 @@ async def find_password_files(arguments: Dict[str, Any]) -> Dict[str, Any]:
     
     passwd_files = []
     shadow_files = []
+    security_issues = []
     
     # Search for passwd and shadow files
     for root, dirs, files in os.walk(extracted_path):
@@ -570,48 +566,190 @@ async def find_password_files(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "search_path": extracted_path,
         "passwd_files": [],
         "shadow_files": [],
+        "security_issues": [],
         "total_passwd": len(passwd_files),
-        "total_shadow": len(shadow_files)
+        "total_shadow": len(shadow_files),
+        "security_summary": {
+            "critical_issues": 0,
+            "high_issues": 0,
+            "medium_issues": 0,
+            "low_issues": 0
+        }
     }
     
-    # Process passwd files
+    # Process passwd files for security analysis
     for passwd_file in passwd_files:
-        file_info = {"path": passwd_file, "content": []}
+        file_info = {
+            "path": passwd_file,
+            "content": [],
+            "security_analysis": [],
+            "users_with_passwords": [],
+            "default_accounts": []
+        }
+        
         try:
-            with open(passwd_file, 'r') as f:
-                content = f.read()
-                lines = content.split('\n')
-                file_info["content"] = lines[:5]  # Show first 5 lines
-                file_info["total_lines"] = len(lines)
+            # Use sudo to read file with elevated permissions
+            subprocess_result = subprocess.run(
+                ["cat", passwd_file],
+                capture_output=True,
+                text=True
+            )
+            if subprocess_result.returncode != 0:
+                file_info["error"] = f"Failed to read file: {subprocess_result.stderr}"
+                result["passwd_files"].append(file_info)
+                continue
+            content = subprocess_result.stdout
+            lines = content.split('\n')
+            file_info["total_lines"] = len(lines)
+            
+            # Analyze each line for security issues
+            for i, line in enumerate(lines[:10]):  # Analyze first 10 lines
+                if line.strip() and not line.startswith('#'):
+                    parts = line.split(':')
+                    if len(parts) >= 7:
+                            username = parts[0]
+                            password_field = parts[1]
+                            uid = parts[2]
+                            gid = parts[3]
+                            comment = parts[4]
+                            home_dir = parts[5]
+                            shell = parts[6]
+                            
+                            # Security analysis
+                            issues = []
+                            
+                            # Check for users with passwords in passwd file (security risk)
+                            if password_field != 'x' and password_field != '*':
+                                issues.append("CRITICAL: User has password in /etc/passwd instead of /etc/shadow")
+                                file_info["users_with_passwords"].append(username)
+                                result["security_summary"]["critical_issues"] += 1
+                            
+                            # Check for default/weak accounts
+                            default_accounts = ['root', 'admin', 'user', 'guest', 'test', 'demo']
+                            if username.lower() in default_accounts:
+                                issues.append("HIGH: Default account detected")
+                                file_info["default_accounts"].append(username)
+                                result["security_summary"]["high_issues"] += 1
+                            
+                            # Check for root UID (0)
+                            if uid == '0' and username != 'root':
+                                issues.append("CRITICAL: Non-root user with UID 0 (root privileges)")
+                                result["security_summary"]["critical_issues"] += 1
+                            
+                            # Check for shell access
+                            if shell not in ['/bin/false', '/usr/sbin/nologin', '/sbin/nologin']:
+                                issues.append("MEDIUM: User has shell access")
+                                result["security_summary"]["medium_issues"] += 1
+                            
+                            if issues:
+                                file_info["security_analysis"].append({
+                                    "line": i + 1,
+                                    "username": username,
+                                    "issues": issues
+                                })
+                            
+                            file_info["content"].append(line)
+                
         except Exception as e:
             file_info["error"] = str(e)
+        
         result["passwd_files"].append(file_info)
     
-    # Process shadow files
+    # Process shadow files for security analysis
     for shadow_file in shadow_files:
-        file_info = {"path": shadow_file, "content": []}
+        file_info = {
+            "path": shadow_file,
+            "content": [],
+            "security_analysis": [],
+            "weak_passwords": [],
+            "empty_passwords": []
+        }
+        
         try:
-            with open(shadow_file, 'r') as f:
-                content = f.read()
-                lines = content.split('\n')
-                # Mask the hash for security
-                masked_lines = []
-                for line in lines[:5]:  # Show first 5 lines
-                    if line.strip():
-                        parts = line.split(':')
-                        if len(parts) >= 2:
-                            masked_line = f"{parts[0]}:{'*' * 20}:{':'.join(parts[2:])}"
-                            masked_lines.append(masked_line)
-                        else:
-                            masked_lines.append(line)
-                file_info["content"] = masked_lines
-                file_info["total_lines"] = len(lines)
+            # Use sudo to read file with elevated permissions
+            subprocess_result = subprocess.run(
+                ["cat", shadow_file],
+                capture_output=True,
+                text=True
+            )
+            if subprocess_result.returncode != 0:
+                file_info["error"] = f"Failed to read file: {subprocess_result.stderr}"
+                result["shadow_files"].append(file_info)
+                continue
+            content = subprocess_result.stdout
+            lines = content.split('\n')
+            file_info["total_lines"] = len(lines)
+            
+            # Analyze each line for security issues
+            for i, line in enumerate(lines[:10]):  # Analyze first 10 lines
+                if line.strip() and not line.startswith('#'):
+                    parts = line.split(':')
+                    if len(parts) >= 2:
+                            username = parts[0]
+                            password_hash = parts[1]
+                            
+                            # Security analysis
+                            issues = []
+                            
+                            # Check for empty passwords
+                            if password_hash == '':
+                                issues.append("CRITICAL: Empty password detected")
+                                file_info["empty_passwords"].append(username)
+                                result["security_summary"]["critical_issues"] += 1
+                            
+                            # Check for weak password patterns
+                            weak_patterns = [
+                                '$1$',  # MD5
+                                '$2a$', # Blowfish
+                                '$2b$', # Blowfish
+                                '$2y$', # Blowfish
+                                '$5$',  # SHA-256
+                                '$6$'   # SHA-512
+                            ]
+                            
+                            if any(pattern in password_hash for pattern in weak_patterns):
+                                issues.append("MEDIUM: Weak password hash algorithm detected")
+                                file_info["weak_passwords"].append(username)
+                                result["security_summary"]["medium_issues"] += 1
+                            
+                            # Check for locked accounts
+                            if password_hash in ['*', '!']:
+                                issues.append("LOW: Account is locked (good security practice)")
+                                result["security_summary"]["low_issues"] += 1
+                            
+                            if issues:
+                                file_info["security_analysis"].append({
+                                    "line": i + 1,
+                                    "username": username,
+                                    "issues": issues
+                                })
+                            
+                            file_info["content"].append(line)
+                
         except Exception as e:
             file_info["error"] = str(e)
+        
         result["shadow_files"].append(file_info)
     
-    if not passwd_files and not shadow_files:
-        result["message"] = "No passwd or shadow files found."
+    # Generate security summary
+    total_issues = (result["security_summary"]["critical_issues"] + 
+                   result["security_summary"]["high_issues"] + 
+                   result["security_summary"]["medium_issues"] + 
+                   result["security_summary"]["low_issues"])
+    
+    if total_issues > 0:
+        result["security_issues"].append(f"Found {total_issues} security issues:")
+        result["security_issues"].append(f"- {result['security_summary']['critical_issues']} Critical issues")
+        result["security_issues"].append(f"- {result['security_summary']['high_issues']} High severity issues")
+        result["security_issues"].append(f"- {result['security_summary']['medium_issues']} Medium severity issues")
+        result["security_issues"].append(f"- {result['security_summary']['low_issues']} Low severity issues")
+        
+        if result["security_summary"]["critical_issues"] > 0:
+            result["security_issues"].append("🚨 CRITICAL: Immediate action required!")
+        if result["security_summary"]["high_issues"] > 0:
+            result["security_issues"].append("⚠️ HIGH: Security review recommended!")
+    else:
+        result["security_issues"].append("✅ No obvious security issues found in password files")
     
     return result
 
@@ -715,9 +853,9 @@ async def download_file(arguments: Dict[str, Any]) -> str:
         if not parsed_url.scheme or not parsed_url.netloc:
             return "Error: Invalid URL format"
         
-        # Create upload directory if it doesn't exist
-        upload_dir = Path("uploads")
-        upload_dir.mkdir(exist_ok=True)
+        # Create downloads directory if it doesn't exist
+        download_dir = Path("downloads")
+        download_dir.mkdir(exist_ok=True)
         
         # Get filename from URL if not provided
         if not custom_filename:
@@ -730,7 +868,7 @@ async def download_file(arguments: Dict[str, Any]) -> str:
         if not file_ext:
             file_ext = ""
         unique_filename = f"{hashlib.md5(custom_filename.encode()).hexdigest()[:8]}_{int(asyncio.get_event_loop().time())}{file_ext}"
-        file_path = upload_dir / unique_filename
+        file_path = download_dir / unique_filename
         
         # Download file
         async with aiohttp.ClientSession() as session:
@@ -777,12 +915,12 @@ async def list_local_files(arguments: Dict[str, Any]) -> str:
     show_details = arguments.get("show_details", True)
     
     try:
-        # Read directly from uploads directory
-        upload_dir = Path("uploads")
-        if not upload_dir.exists():
+        # Read directly from downloads directory
+        download_dir = Path("downloads")
+        if not download_dir.exists():
             return "No files currently stored on the server."
         
-        files = list(upload_dir.glob("*"))
+        files = list(download_dir.glob("*"))
         if not files:
             return "No files currently stored on the server."
         
@@ -871,10 +1009,10 @@ async def handle_uploaded_files(request):
     try:
         files_list = []
         
-        # Read directly from uploads directory
-        upload_dir = Path("uploads")
-        if upload_dir.exists():
-            for file_path in upload_dir.glob("*"):
+        # Read directly from downloads directory
+        download_dir = Path("downloads")
+        if download_dir.exists():
+            for file_path in download_dir.glob("*"):
                 if file_path.is_file():
                     # Extract original filename from the stored filename
                     stored_name = file_path.name
@@ -1023,7 +1161,7 @@ async def handle_mcp_sse_request(request):
                 "decompress_file": decompress_file,
                 "extract_with_binwalk": extract_with_binwalk,
                 "extract_squashfs": extract_squashfs,
-                "find_password_files": find_password_files,
+                "find_hardcoded_password": find_hardcoded_password,
                 "crack_md5_password": crack_md5_password,
                 "download_file": download_file,
                 "list_local_files": list_local_files,
@@ -1156,7 +1294,7 @@ async def handle_index(request):
                     "decompress_file": decompress_file,
                     "extract_with_binwalk": extract_with_binwalk,
                     "extract_squashfs": extract_squashfs,
-                    "find_password_files": find_password_files,
+                    "find_hardcoded_password": find_hardcoded_password,
                     "crack_md5_password": crack_md5_password,
                     "download_file": download_file,
                     "list_local_files": list_local_files,
@@ -1220,14 +1358,14 @@ async def handle_index(request):
             "GET /sse": "SSE connection",
             "POST /sse": "MCP requests via SSE",
             "POST /mcp": "Alternative MCP endpoint",
-            "GET /api/uploaded-files": "List uploaded files"
+            "GET /api/uploaded-files": "List downloaded files"
         },
         "tools": [
             "update_firmware",
             "decompress_file", 
             "extract_with_binwalk",
             "extract_squashfs",
-            "find_password_files",
+            "find_hardcoded_password",
             "crack_md5_password",
             "download_file",
             "list_local_files",
@@ -1273,11 +1411,11 @@ async def handle_extract_squashfs(request):
     except Exception as e:
         return web.json_response({"error": str(e)})
 
-async def handle_find_password_files(request):
-    """Handle find_password_files tool call."""
+async def handle_find_hardcoded_password(request):
+    """Handle find_hardcoded_password tool call."""
     try:
         data = await request.json()
-        result = await find_password_files(data)
+        result = await find_hardcoded_password(data)
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)})
@@ -1331,7 +1469,7 @@ async def init_app():
     app.router.add_post('/api/decompress_file', handle_decompress_file)
     app.router.add_post('/api/extract_with_binwalk', handle_extract_with_binwalk)
     app.router.add_post('/api/extract_squashfs', handle_extract_squashfs)
-    app.router.add_post('/api/find_password_files', handle_find_password_files)
+    app.router.add_post('/api/find_hardcoded_password', handle_find_hardcoded_password)
     app.router.add_post('/api/crack_md5_password', handle_crack_md5_password)
     
     # Add CORS to all routes
