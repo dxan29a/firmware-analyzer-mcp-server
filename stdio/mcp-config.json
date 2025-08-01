@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "firmware-analyzer": {
+      "command": "python3",
+      "args": ["firmware_analyzer_mcp.py"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    }
+  }
+} 
