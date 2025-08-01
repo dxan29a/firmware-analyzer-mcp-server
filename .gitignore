@@ -349,4 +349,16 @@ env/
 # Temporary files created during analysis
 temp_*/
 tmp_*/
-cache_*/ 
+cache_*/
+
+# Uploaded files
+uploads/
+*.zip
+*.bin
+*.img
+*.firmware
+*.fw
+*.rom
+*.hex
+*.srec
+*.ihex 

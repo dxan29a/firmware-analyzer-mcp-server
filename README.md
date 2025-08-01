@@ -1,6 +1,6 @@
 # 🔍 Firmware Analyzer MCP Server Collection
 
-A comprehensive collection of **Model Context Protocol (MCP) servers** for firmware analysis and password extraction, implemented across three different transport protocols.
+A comprehensive collection of **Model Context Protocol (MCP) servers** for firmware analysis and password extraction, implemented across four different transport protocols.
 
 ## 📁 **Project Structure**
 
@@ -9,6 +9,7 @@ rock-firmware/
 ├── stdio/              # Standard stdio-based MCP server
 ├── network/            # TCP network-based MCP server  
 ├── streaming-http/     # HTTP/HTTPS streaming MCP server
+├── sse/                # Server-Sent Events (SSE) MCP server
 ├── requirements.txt    # Python dependencies
 ├── install.sh         # Installation script
 ├── firmware_analysis_report.html  # HTML analysis report
@@ -51,9 +52,17 @@ python3 firmware_analyzer_mcp.py
 # Use with MCP clients
 ```
 
+#### **⚡ SSE Server (Real-time Communication)**
+```bash
+cd sse
+python3 firmware_analyzer_mcp_sse.py --port 8083
+# Open browser: http://localhost:8083
+# Perfect for VS Code GitHub Copilot integration
+```
+
 ## 🔧 **Available Tools**
 
-All three implementations provide the same 6 analysis tools:
+All four implementations provide the same 6 analysis tools:
 
 1. **`update_firmware`** - Upload and validate `.bin` firmware files
 2. **`identify_file_format`** - Detect ZIP, binary, SquashFS formats
@@ -64,24 +73,27 @@ All three implementations provide the same 6 analysis tools:
 
 ## 🆚 **Transport Comparison**
 
-| Feature | stdio | Network | HTTP |
-|---------|-------|---------|------|
-| **Protocol** | stdio | TCP | HTTP/HTTPS |
-| **Web Interface** | ❌ | ❌ | ✅ Built-in |
-| **REST API** | ❌ | ❌ | ✅ Yes |
-| **Browser Support** | ❌ | ❌ | ✅ Yes |
-| **Multi-Client** | ❌ | ✅ Yes | ✅ Yes |
-| **SSL/TLS** | ❌ | ✅ Manual | ✅ Native |
-| **MCP Compliance** | ✅ Full | ✅ Full | ⚠️ Custom |
-| **Performance** | ✅ Fastest | ✅ Fast | ⚠️ HTTP overhead |
-| **Ease of Use** | ⚠️ Moderate | ⚠️ Moderate | ✅ Very Easy |
-| **Integration** | ⚠️ MCP only | ⚠️ TCP only | ✅ Universal |
+| Feature | stdio | Network | HTTP | SSE |
+|---------|-------|---------|------|-----|
+| **Protocol** | stdio | TCP | HTTP/HTTPS | SSE + HTTP |
+| **Web Interface** | ❌ | ❌ | ✅ Built-in | ✅ Built-in |
+| **REST API** | ❌ | ❌ | ✅ Yes | ✅ Yes |
+| **Browser Support** | ❌ | ❌ | ✅ Yes | ✅ Yes |
+| **Multi-Client** | ❌ | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Real-time Updates** | ❌ | ❌ | ❌ | ✅ Yes |
+| **SSL/TLS** | ❌ | ✅ Manual | ✅ Native | ✅ Native |
+| **MCP Compliance** | ✅ Full | ✅ Full | ⚠️ Custom | ⚠️ Custom |
+| **VS Code Integration** | ✅ Direct | ❌ Bridge | ❌ Bridge | ✅ Via Bridge |
+| **Performance** | ✅ Fastest | ✅ Fast | ⚠️ HTTP overhead | ✅ Fast |
+| **Ease of Use** | ⚠️ Moderate | ⚠️ Moderate | ✅ Very Easy | ✅ Very Easy |
+| **Integration** | ⚠️ MCP only | ⚠️ TCP only | ✅ Universal | ✅ Universal |
 
 ## 📖 **Documentation**
 
 - **[stdio/](stdio/)** - Standard MCP server with stdio transport
 - **[network/](network/)** - TCP network server with multi-client support
 - **[streaming-http/](streaming-http/)** - HTTP server with web interface and REST API
+- **[sse/](sse/)** - SSE server with real-time communication and VS Code integration
 
 ## 🎯 **Use Cases**
 
@@ -104,6 +116,13 @@ All three implementations provide the same 6 analysis tools:
 - You want the easiest setup and usage
 - You need browser-based access
 
+### **Choose SSE if:**
+- You need real-time communication
+- You want VS Code GitHub Copilot integration
+- You need automatic reconnection
+- You're building modern web applications
+- You want the best of both worlds (HTTP + real-time)
+
 ## 🔍 **Analysis Reports**
 
 The project includes analysis reports from previous firmware analysis:
@@ -123,10 +142,14 @@ cd network && python3 test_network_connection.py
 
 # Test HTTP server
 cd streaming-http && python3 http_mcp_client.py --test-tools
+
+# Test SSE server
+cd sse && python3 firmware_analyzer_mcp_sse.py --port 8083
+curl -N http://localhost:8083/sse
 ```
 
 ### **Adding New Tools**
-All three implementations share the same core analysis functions. To add a new tool:
+All four implementations share the same core analysis functions. To add a new tool:
 
 1. Add the function to the core analysis logic
 2. Update all three server implementations

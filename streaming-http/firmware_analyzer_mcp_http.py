@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import magic
 from passlib.hash import md5_crypt
 import shutil
-from aiohttp import web, WSMsgType
+from aiohttp import web, WSMsgType, MultipartReader
 import aiohttp_cors
 import ssl
 
@@ -29,22 +29,91 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global variables to store extracted files
+# Global variables to store extracted files and uploaded files
 extracted_files = {}
 current_firmware_path = None
+uploaded_files = {}  # Store uploaded file paths
 
 # Create a simple notification options object
 class SimpleNotificationOptions:
     def __init__(self):
         self.tools_changed = False
 
+async def handle_file_upload(request):
+    """Handle file upload via multipart form data."""
+    try:
+        # Create upload directory if it doesn't exist
+        upload_dir = Path("uploads")
+        upload_dir.mkdir(exist_ok=True)
+        
+        # Read multipart data
+        reader = await request.multipart()
+        
+        uploaded_file_path = None
+        file_info = {}
+        
+        async for field in reader:
+            if field.name == 'file':
+                # Get file info
+                filename = field.filename
+                if not filename:
+                    return web.json_response({"error": "No file provided"})
+                
+                # Create unique filename
+                file_ext = Path(filename).suffix
+                unique_filename = f"{hashlib.md5(filename.encode()).hexdigest()[:8]}_{int(asyncio.get_event_loop().time())}{file_ext}"
+                file_path = upload_dir / unique_filename
+                
+                # Save uploaded file
+                with open(file_path, 'wb') as f:
+                    while True:
+                        chunk = await field.read_chunk(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                
+                uploaded_file_path = str(file_path)
+                file_info = {
+                    "original_name": filename,
+                    "saved_path": uploaded_file_path,
+                    "file_size": os.path.getsize(uploaded_file_path),
+                    "upload_time": asyncio.get_event_loop().time()
+                }
+                
+                # Store file info
+                uploaded_files[uploaded_file_path] = file_info
+                
+                logger.info(f"File uploaded: {filename} -> {uploaded_file_path}")
+                break
+        
+        if uploaded_file_path:
+            return web.json_response({
+                "success": True,
+                "message": f"File uploaded successfully: {file_info['original_name']}",
+                "file_info": file_info
+            })
+        else:
+            return web.json_response({"error": "No file received"})
+            
+    except Exception as e:
+        logger.error(f"File upload error: {e}")
+        return web.json_response({"error": f"Upload failed: {str(e)}"})
+
 async def update_firmware(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Upload and update firmware (.bin file)."""
     global current_firmware_path
     
-    firmware_path = arguments["firmware_path"]
+    firmware_path = arguments.get("firmware_path")
     
-    if not os.path.exists(firmware_path):
+    # Check if it's an uploaded file ID
+    if firmware_path and firmware_path.startswith("upload_"):
+        # Extract file path from uploaded files
+        for file_path, file_info in uploaded_files.items():
+            if file_info.get("original_name") == firmware_path.replace("upload_", ""):
+                firmware_path = file_path
+                break
+    
+    if not firmware_path or not os.path.exists(firmware_path):
         return {
             "error": f"Firmware file not found at {firmware_path}"
         }
@@ -67,9 +136,17 @@ async def update_firmware(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 async def identify_file_format(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Identify the format of uploaded file and handle accordingly."""
-    file_path = arguments["file_path"]
+    file_path = arguments.get("file_path")
     
-    if not os.path.exists(file_path):
+    # Check if it's an uploaded file ID
+    if file_path and file_path.startswith("upload_"):
+        # Extract file path from uploaded files
+        for path, file_info in uploaded_files.items():
+            if file_info.get("original_name") == file_path.replace("upload_", ""):
+                file_path = path
+                break
+    
+    if not file_path or not os.path.exists(file_path):
         return {
             "error": f"File not found at {file_path}"
         }
@@ -122,9 +199,17 @@ async def identify_file_format(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 async def extract_with_binwalk(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Use binwalk to recursively extract files from binary."""
-    binary_path = arguments["binary_path"]
+    binary_path = arguments.get("binary_path")
     
-    if not os.path.exists(binary_path):
+    # Check if it's an uploaded file ID
+    if binary_path and binary_path.startswith("upload_"):
+        # Extract file path from uploaded files
+        for path, file_info in uploaded_files.items():
+            if file_info.get("original_name") == binary_path.replace("upload_", ""):
+                binary_path = path
+                break
+    
+    if not binary_path or not os.path.exists(binary_path):
         return {
             "error": f"Binary file not found at {binary_path}"
         }
@@ -186,9 +271,17 @@ async def extract_with_binwalk(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 async def extract_squashfs(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Use unsquash tool to open a Squashfs filesystem."""
-    squashfs_path = arguments["squashfs_path"]
+    squashfs_path = arguments.get("squashfs_path")
     
-    if not os.path.exists(squashfs_path):
+    # Check if it's an uploaded file ID
+    if squashfs_path and squashfs_path.startswith("upload_"):
+        # Extract file path from uploaded files
+        for path, file_info in uploaded_files.items():
+            if file_info.get("original_name") == squashfs_path.replace("upload_", ""):
+                squashfs_path = path
+                break
+    
+    if not squashfs_path or not os.path.exists(squashfs_path):
         return {
             "error": f"SquashFS file not found at {squashfs_path}"
         }
@@ -235,9 +328,9 @@ async def extract_squashfs(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 async def find_password_files(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Find /etc/passwd and /etc/shadow files in extracted filesystem."""
-    extracted_path = arguments["extracted_path"]
+    extracted_path = arguments.get("extracted_path")
     
-    if not os.path.exists(extracted_path):
+    if not extracted_path or not os.path.exists(extracted_path):
         return {
             "error": f"Extracted path not found at {extracted_path}"
         }
@@ -306,7 +399,7 @@ async def find_password_files(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 async def crack_md5_password(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Try to crack MD5-crypt passwords using various methods."""
-    password_hash = arguments["password_hash"]
+    password_hash = arguments.get("password_hash")
     wordlist_path = arguments.get("wordlist_path")
     
     result = {
@@ -385,6 +478,26 @@ async def crack_md5_password(arguments: Dict[str, Any]) -> Dict[str, Any]:
     
     return result
 
+async def handle_uploaded_files(request):
+    """Get list of uploaded files."""
+    try:
+        files_list = []
+        for file_path, file_info in uploaded_files.items():
+            files_list.append({
+                "id": f"upload_{file_info['original_name']}",
+                "name": file_info['original_name'],
+                "path": file_path,
+                "size": file_info['file_size'],
+                "upload_time": file_info['upload_time']
+            })
+        
+        return web.json_response({
+            "success": True,
+            "files": files_list
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)})
+
 # HTTP route handlers
 async def handle_index(request):
     """Serve the main HTML page."""
@@ -401,24 +514,42 @@ async def handle_index(request):
             .tool { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
             .input-group { margin: 10px 0; }
             label { display: block; margin-bottom: 5px; font-weight: bold; }
-            input, textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 3px; }
-            button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 3px; cursor: pointer; }
+            input, textarea, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 3px; }
+            button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 3px; cursor: pointer; margin: 5px; }
             button:hover { background: #0056b3; }
             .result { margin-top: 15px; padding: 10px; background: #f8f9fa; border-radius: 3px; white-space: pre-wrap; }
             .error { color: red; }
             .success { color: green; }
+            .file-upload { border: 2px dashed #ddd; padding: 20px; text-align: center; border-radius: 5px; }
+            .file-upload.dragover { border-color: #007bff; background: #f0f8ff; }
+            .uploaded-files { margin: 10px 0; }
+            .file-item { padding: 5px; background: #f8f9fa; margin: 2px 0; border-radius: 3px; }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🔍 Firmware Analyzer MCP Server</h1>
-            <p>Network-based firmware analysis and password extraction tool.</p>
+            <p>Network-based firmware analysis and password extraction tool with file upload support.</p>
+            
+            <div class="tool">
+                <h3>📁 File Upload</h3>
+                <div class="file-upload" id="fileUpload">
+                    <p>Drag and drop firmware files here or click to select</p>
+                    <input type="file" id="fileInput" style="display: none;" accept=".bin,.zip,.img,.firmware,.fw,.rom,.hex,.srec,.ihex">
+                    <button onclick="document.getElementById('fileInput').click()">Select File</button>
+                </div>
+                <div id="uploadedFiles" class="uploaded-files"></div>
+                <div id="upload_result" class="result"></div>
+            </div>
             
             <div class="tool">
                 <h3>1. Update Firmware</h3>
                 <div class="input-group">
-                    <label>Firmware Path:</label>
-                    <input type="text" id="firmware_path" placeholder="/path/to/firmware.bin">
+                    <label>Firmware File:</label>
+                    <select id="firmware_select">
+                        <option value="">Select uploaded file or enter path</option>
+                    </select>
+                    <input type="text" id="firmware_path" placeholder="Or enter file path: /path/to/firmware.bin">
                 </div>
                 <button onclick="updateFirmware()">Update Firmware</button>
                 <div id="update_result" class="result"></div>
@@ -427,8 +558,11 @@ async def handle_index(request):
             <div class="tool">
                 <h3>2. Identify File Format</h3>
                 <div class="input-group">
-                    <label>File Path:</label>
-                    <input type="text" id="file_path" placeholder="/path/to/file">
+                    <label>File:</label>
+                    <select id="file_select">
+                        <option value="">Select uploaded file or enter path</option>
+                    </select>
+                    <input type="text" id="file_path" placeholder="Or enter file path: /path/to/file">
                 </div>
                 <button onclick="identifyFormat()">Identify Format</button>
                 <div id="format_result" class="result"></div>
@@ -437,8 +571,11 @@ async def handle_index(request):
             <div class="tool">
                 <h3>3. Extract with Binwalk</h3>
                 <div class="input-group">
-                    <label>Binary Path:</label>
-                    <input type="text" id="binary_path" placeholder="/path/to/binary">
+                    <label>Binary File:</label>
+                    <select id="binary_select">
+                        <option value="">Select uploaded file or enter path</option>
+                    </select>
+                    <input type="text" id="binary_path" placeholder="Or enter file path: /path/to/binary">
                 </div>
                 <button onclick="extractBinwalk()">Extract</button>
                 <div id="binwalk_result" class="result"></div>
@@ -447,8 +584,11 @@ async def handle_index(request):
             <div class="tool">
                 <h3>4. Extract SquashFS</h3>
                 <div class="input-group">
-                    <label>SquashFS Path:</label>
-                    <input type="text" id="squashfs_path" placeholder="/path/to/squashfs">
+                    <label>SquashFS File:</label>
+                    <select id="squashfs_select">
+                        <option value="">Select uploaded file or enter path</option>
+                    </select>
+                    <input type="text" id="squashfs_path" placeholder="Or enter file path: /path/to/squashfs">
                 </div>
                 <button onclick="extractSquashfs()">Extract</button>
                 <div id="squashfs_result" class="result"></div>
@@ -480,6 +620,99 @@ async def handle_index(request):
         </div>
         
         <script>
+            // File upload handling
+            const fileUpload = document.getElementById('fileUpload');
+            const fileInput = document.getElementById('fileInput');
+            
+            fileUpload.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                fileUpload.classList.add('dragover');
+            });
+            
+            fileUpload.addEventListener('dragleave', () => {
+                fileUpload.classList.remove('dragover');
+            });
+            
+            fileUpload.addEventListener('drop', (e) => {
+                e.preventDefault();
+                fileUpload.classList.remove('dragover');
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    uploadFile(files[0]);
+                }
+            });
+            
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    uploadFile(e.target.files[0]);
+                }
+            });
+            
+            async function uploadFile(file) {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                try {
+                    const response = await fetch('/api/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const result = await response.json();
+                    document.getElementById('upload_result').textContent = JSON.stringify(result, null, 2);
+                    
+                    if (result.success) {
+                        loadUploadedFiles();
+                    }
+                } catch (error) {
+                    document.getElementById('upload_result').textContent = JSON.stringify({error: error.message}, null, 2);
+                }
+            }
+            
+            async function loadUploadedFiles() {
+                try {
+                    const response = await fetch('/api/uploaded-files');
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        const filesList = result.files.map(f => 
+                            `<div class="file-item">📁 ${f.name} (${formatFileSize(f.size)})</div>`
+                        ).join('');
+                        
+                        document.getElementById('uploadedFiles').innerHTML = filesList;
+                        
+                        // Update select dropdowns
+                        updateSelectDropdowns(result.files);
+                    }
+                } catch (error) {
+                    console.error('Error loading uploaded files:', error);
+                }
+            }
+            
+            function updateSelectDropdowns(files) {
+                const selects = ['firmware_select', 'file_select', 'binary_select', 'squashfs_select'];
+                
+                selects.forEach(selectId => {
+                    const select = document.getElementById(selectId);
+                    select.innerHTML = '<option value="">Select uploaded file or enter path</option>';
+                    
+                    files.forEach(file => {
+                        const option = document.createElement('option');
+                        option.value = `upload_${file.name}`;
+                        option.textContent = `${file.name} (${formatFileSize(file.size)})`;
+                        select.appendChild(option);
+                    });
+                });
+            }
+            
+            function formatFileSize(bytes) {
+                if (bytes === 0) return '0 Bytes';
+                const k = 1024;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+            
             async function callTool(toolName, arguments) {
                 try {
                     const response = await fetch(`/api/${toolName}`, {
@@ -502,26 +735,38 @@ async def handle_index(request):
             }
             
             async function updateFirmware() {
-                const path = document.getElementById('firmware_path').value;
-                const result = await callTool('update_firmware', { firmware_path: path });
+                const selectValue = document.getElementById('firmware_select').value;
+                const pathValue = document.getElementById('firmware_path').value;
+                const firmwarePath = selectValue || pathValue;
+                
+                const result = await callTool('update_firmware', { firmware_path: firmwarePath });
                 document.getElementById('update_result').textContent = JSON.stringify(result, null, 2);
             }
             
             async function identifyFormat() {
-                const path = document.getElementById('file_path').value;
-                const result = await callTool('identify_file_format', { file_path: path });
+                const selectValue = document.getElementById('file_select').value;
+                const pathValue = document.getElementById('file_path').value;
+                const filePath = selectValue || pathValue;
+                
+                const result = await callTool('identify_file_format', { file_path: filePath });
                 document.getElementById('format_result').textContent = JSON.stringify(result, null, 2);
             }
             
             async function extractBinwalk() {
-                const path = document.getElementById('binary_path').value;
-                const result = await callTool('extract_with_binwalk', { binary_path: path });
+                const selectValue = document.getElementById('binary_select').value;
+                const pathValue = document.getElementById('binary_path').value;
+                const binaryPath = selectValue || pathValue;
+                
+                const result = await callTool('extract_with_binwalk', { binary_path: binaryPath });
                 document.getElementById('binwalk_result').textContent = JSON.stringify(result, null, 2);
             }
             
             async function extractSquashfs() {
-                const path = document.getElementById('squashfs_path').value;
-                const result = await callTool('extract_squashfs', { squashfs_path: path });
+                const selectValue = document.getElementById('squashfs_select').value;
+                const pathValue = document.getElementById('squashfs_path').value;
+                const squashfsPath = selectValue || pathValue;
+                
+                const result = await callTool('extract_squashfs', { squashfs_path: squashfsPath });
                 document.getElementById('squashfs_result').textContent = JSON.stringify(result, null, 2);
             }
             
@@ -539,6 +784,9 @@ async def handle_index(request):
                 const result = await callTool('crack_md5_password', args);
                 document.getElementById('crack_result').textContent = JSON.stringify(result, null, 2);
             }
+            
+            // Load uploaded files on page load
+            loadUploadedFiles();
         </script>
     </body>
     </html>
@@ -610,7 +858,7 @@ async def handle_tools_list(request):
                 "properties": {
                     "firmware_path": {
                         "type": "string",
-                        "description": "Path to the firmware file (.bin)"
+                        "description": "Path to the firmware file (.bin) or uploaded file ID"
                     }
                 },
                 "required": ["firmware_path"]
@@ -624,7 +872,7 @@ async def handle_tools_list(request):
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the file to analyze"
+                        "description": "Path to the file to analyze or uploaded file ID"
                     }
                 },
                 "required": ["file_path"]
@@ -638,7 +886,7 @@ async def handle_tools_list(request):
                 "properties": {
                     "binary_path": {
                         "type": "string",
-                        "description": "Path to the binary file to extract"
+                        "description": "Path to the binary file to extract or uploaded file ID"
                     }
                 },
                 "required": ["binary_path"]
@@ -652,7 +900,7 @@ async def handle_tools_list(request):
                 "properties": {
                     "squashfs_path": {
                         "type": "string",
-                        "description": "Path to the squashfs file"
+                        "description": "Path to the squashfs file or uploaded file ID"
                     }
                 },
                 "required": ["squashfs_path"]
@@ -694,6 +942,207 @@ async def handle_tools_list(request):
     
     return web.json_response({"tools": tools})
 
+# MCP Protocol endpoints for GitHub Copilot
+async def handle_mcp_initialize(request):
+    """Handle MCP initialize request."""
+    try:
+        data = await request.json()
+        
+        # MCP initialize response
+        response = {
+            "jsonrpc": "2.0",
+            "id": data.get("id"),
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "firmware-analyzer-mcp",
+                    "version": "1.0.0"
+                }
+            }
+        }
+        
+        return web.json_response(response)
+    except Exception as e:
+        return web.json_response({
+            "jsonrpc": "2.0",
+            "id": data.get("id") if 'data' in locals() else None,
+            "error": {
+                "code": -32603,
+                "message": f"Internal error: {str(e)}"
+            }
+        })
+
+async def handle_mcp_tools_list(request):
+    """Handle MCP tools/list request."""
+    try:
+        data = await request.json()
+        
+        tools = [
+            {
+                "name": "update_firmware",
+                "description": "Upload and update firmware (.bin file)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "firmware_path": {
+                            "type": "string",
+                            "description": "Path to the firmware file (.bin) or uploaded file ID"
+                        }
+                    },
+                    "required": ["firmware_path"]
+                }
+            },
+            {
+                "name": "identify_file_format",
+                "description": "Identify the format of uploaded file and handle accordingly",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file to analyze or uploaded file ID"
+                        }
+                    },
+                    "required": ["file_path"]
+                }
+            },
+            {
+                "name": "extract_with_binwalk",
+                "description": "Use binwalk to recursively extract files from binary",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "binary_path": {
+                            "type": "string",
+                            "description": "Path to the binary file to extract or uploaded file ID"
+                        }
+                    },
+                    "required": ["binary_path"]
+                }
+            },
+            {
+                "name": "extract_squashfs",
+                "description": "Use unsquash tool to open a Squashfs filesystem",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "squashfs_path": {
+                            "type": "string",
+                            "description": "Path to the squashfs file or uploaded file ID"
+                        }
+                    },
+                    "required": ["squashfs_path"]
+                }
+            },
+            {
+                "name": "find_password_files",
+                "description": "Find /etc/passwd and /etc/shadow files in extracted filesystem",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "extracted_path": {
+                            "type": "string",
+                            "description": "Path to the extracted filesystem"
+                        }
+                    },
+                    "required": ["extracted_path"]
+                }
+            },
+            {
+                "name": "crack_md5_password",
+                "description": "Try to crack MD5-crypt passwords using various methods",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "password_hash": {
+                            "type": "string",
+                            "description": "MD5-crypt hash to crack"
+                        },
+                        "wordlist_path": {
+                            "type": "string",
+                            "description": "Optional path to wordlist file"
+                        }
+                    },
+                    "required": ["password_hash"]
+                }
+            }
+        ]
+        
+        response = {
+            "jsonrpc": "2.0",
+            "id": data.get("id"),
+            "result": {
+                "tools": tools
+            }
+        }
+        
+        return web.json_response(response)
+    except Exception as e:
+        return web.json_response({
+            "jsonrpc": "2.0",
+            "id": data.get("id") if 'data' in locals() else None,
+            "error": {
+                "code": -32603,
+                "message": f"Internal error: {str(e)}"
+            }
+        })
+
+async def handle_mcp_tools_call(request):
+    """Handle MCP tools/call request."""
+    try:
+        data = await request.json()
+        
+        method = data.get("params", {}).get("name")
+        arguments = data.get("params", {}).get("arguments", {})
+        
+        # Map MCP tool calls to our functions
+        tool_handlers = {
+            "update_firmware": update_firmware,
+            "identify_file_format": identify_file_format,
+            "extract_with_binwalk": extract_with_binwalk,
+            "extract_squashfs": extract_squashfs,
+            "find_password_files": find_password_files,
+            "crack_md5_password": crack_md5_password
+        }
+        
+        if method in tool_handlers:
+            result = await tool_handlers[method](arguments)
+            response = {
+                "jsonrpc": "2.0",
+                "id": data.get("id"),
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(result, indent=2)
+                        }
+                    ]
+                }
+            }
+        else:
+            response = {
+                "jsonrpc": "2.0",
+                "id": data.get("id"),
+                "error": {
+                    "code": -32601,
+                    "message": f"Method not found: {method}"
+                }
+            }
+        
+        return web.json_response(response)
+    except Exception as e:
+        return web.json_response({
+            "jsonrpc": "2.0",
+            "id": data.get("id") if 'data' in locals() else None,
+            "error": {
+                "code": -32603,
+                "message": f"Internal error: {str(e)}"
+            }
+        })
+
 async def init_app():
     """Initialize the web application."""
     app = web.Application()
@@ -710,6 +1159,8 @@ async def init_app():
     
     # Add routes
     app.router.add_get('/', handle_index)
+    app.router.add_post('/api/upload', handle_file_upload)
+    app.router.add_get('/api/uploaded-files', handle_uploaded_files)
     app.router.add_get('/api/tools/list', handle_tools_list)
     app.router.add_post('/api/update_firmware', handle_update_firmware)
     app.router.add_post('/api/identify_file_format', handle_identify_file_format)
@@ -717,6 +1168,11 @@ async def init_app():
     app.router.add_post('/api/extract_squashfs', handle_extract_squashfs)
     app.router.add_post('/api/find_password_files', handle_find_password_files)
     app.router.add_post('/api/crack_md5_password', handle_crack_md5_password)
+    
+    # MCP Protocol routes for GitHub Copilot
+    app.router.add_post('/mcp/initialize', handle_mcp_initialize)
+    app.router.add_post('/mcp/tools/list', handle_mcp_tools_list)
+    app.router.add_post('/mcp/tools/call', handle_mcp_tools_call)
     
     # Add CORS to all routes
     for route in list(app.router.routes()):
